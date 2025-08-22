@@ -208,4 +208,52 @@
   (ok claim-id))
 )
 
+;; Process claim payout with automated approval for low-risk claims
+(define-public (process-claim (claim-id uint))
+  (let (
+    (claim (unwrap! (map-get? claims { claim-id: claim-id }) err-not-found))
+    (policy (unwrap! (map-get? policies { policy-id: (get policy-id claim) }) err-not-found))
+  )
+  ;; Validate processing conditions
+  (asserts! (not (get processed claim)) err-claim-already-processed)
+  (asserts! (>= (var-get contract-balance) (get amount claim)) err-insufficient-funds)
+  
+  ;; Auto-process if approved and low fraud score
+  (if (and (get approved claim) (< (get fraud-score claim) u30))
+    (begin
+      ;; Execute payout
+      (try! (as-contract (stx-transfer? (get amount claim) tx-sender (get claimant claim))))
+      
+      ;; Update claim status
+      (map-set claims 
+        { claim-id: claim-id }
+        (merge claim { processed: true })
+      )
+      
+      ;; Update user profile
+      (map-set user-profiles
+        { user: (get claimant claim) }
+        (merge 
+          (default-to { total-policies: u0, claims-history: u0, reputation-score: u50, last-claim-block: u0, blacklisted: false }
+                      (map-get? user-profiles { user: (get claimant claim) }))
+          { 
+            claims-history: (+ (get claims-history (default-to { total-policies: u0, claims-history: u0, reputation-score: u50, last-claim-block: u0, blacklisted: false }
+                                                                (map-get? user-profiles { user: (get claimant claim) }))) u1),
+            last-claim-block: block-height,
+            reputation-score: (if (< (get fraud-score claim) u20) 
+                                (- (get reputation-score (default-to { total-policies: u0, claims-history: u0, reputation-score: u50, last-claim-block: u0, blacklisted: false }
+                                                                     (map-get? user-profiles { user: (get claimant claim) }))) u5)
+                                (+ (get reputation-score (default-to { total-policies: u0, claims-history: u0, reputation-score: u50, last-claim-block: u0, blacklisted: false }
+                                                                     (map-get? user-profiles { user: (get claimant claim) }))) u10))
+          }
+        )
+      )
+      
+      ;; Update contract balance
+      (var-set contract-balance (- (var-get contract-balance) (get amount claim)))
+      (ok true))
+    (ok false)) ;; Requires manual review for high-risk claims
+  )
+)
+
 
